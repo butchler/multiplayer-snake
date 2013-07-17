@@ -6,60 +6,103 @@
 (repl/connect "http://localhost:9000/repl")
 
 ;; Constants
-(def FPS 10)
-(def width 400)
-(def height 400)
-(def radius 10)
+(def fps 10)
+(def cols 40)
+(def rows 40)
 
-;; Init canvas.
-(def canvas (js/document.createElement "canvas"))
-(js/document.body.appendChild canvas)
-(set! (.-width canvas) width)
-(set! (.-height canvas) height)
-(def brush (.getContext canvas "2d"))
+;; Rendering
+(defn el
+  "Utility function for creating DOM elements."
+  ([tag] (el tag {} ()))
 
-(defn fill-circle [radius x y]
-  (doto brush
-    (.beginPath)
-    (.arc x y radius 0 (* 2 js/Math.PI) false)
-    (.closePath)
-    (.fill)))
+  ([tag arg]
+   (cond
+     (map? arg) (el tag arg ())
+     :else (el tag {} arg)))
 
-(defn render [our-pos their-pos]
-  (.clearRect brush 0 0 width height)
-  (set! (.-fillStyle brush) "blue")
-  (apply fill-circle radius our-pos)
-  (set! (.-fillStyle brush) "red")
-  (apply fill-circle radius their-pos))
+  ([tag attributes children]
+   (let [element (js/document.createElement tag)]
 
-;; Init Firebase.
+     ; Assign attributes
+     (doseq [[attr value] attributes]
+       (aset element (name attr) value))
+
+     ; Append children.
+     (doseq [child children]
+       (.appendChild element child))
+
+     element)))
+
+(defn make-grid! []
+  "Make a grid of cells (as <b> elements), append the grid to body, and return
+  the cells as a matrix."
+  (let [cells (vec (for [_ (range rows)]
+                (vec (for [_ (range cols)]
+                  (el "b")))))
+        grid (el "div" {:className "grid"} (for [row cells]
+                                             (el "div" {:className "row"} row)))]
+    (js/document.body.appendChild grid)
+    cells))
+
+(def grid (make-grid!))
+
+#_
+(defn render [state]
+  (doseq [x (range cols) y (range rows)]
+    (let [pos [x y]
+          player-1-positions (set (get-in state ["player-1" :pos]))
+          player-2-positions (set (get-in state ["player-2" :pos]))
+          class (cond
+                  (player-1-positions pos) "player-1"
+                  (player-2-positions pos) "player-2"
+                  :else "")]
+      (set! (.-className (get-in grid [y x])) class))))
+
+(defn set-cell! [[x y] class]
+  (when-let [cell (get-in grid [y x])]
+    (aset cell "className" class)))
+
+(defn render-player! [state prev-state player]
+  (set-cell! (last (get-in prev-state [player :pos])) "")
+  (set-cell! (first (get-in state [player :pos])) player))
+
+(defn render! [state prev-state]
+  (render-player! state prev-state "player-1")
+  (render-player! state prev-state "player-2"))
+
+;; Firebase
 (def root (new js/Firebase "https://snake.firebaseio.com/"))
 
 (defn path [name] (.child root name))
 
 (defn nil->false [x]
-  ;; nil cannot be sent through channels, so this is used to turn nil into false.
+  "nil cannot be sent through channels, so this is used to turn nil into false."
   (if (nil? x)
     false
     x))
 
 (defn on [firebase event-type]
+  "Creates a channel for a Firebase event."
   (let [c (chan 10)]
     (.on firebase event-type #(put! c (nil->false (.val %))) #(close! c))
     c))
 
 (defn once [firebase event-type]
+  "Creates a channel for a Firebase event that only executes once."
   (let [c (chan)]
     (.once firebase event-type #(put! c (nil->false (.val %))) #(close! c))
     c))
 
-;; Utility functions.
+;; Utility
 (defn tick-chan [ms]
+  "Creates a channel that gets \"tick\" put onto it every ms milliseconds."
   (let [c (chan)]
     (js/setInterval #(put! c "tick") ms)
     c))
 
 (defn direction-chan []
+  "Creates a channel that gets direction strings (e.g. \"left\", \"up\") put
+  onto it whenever the user presses a key."
   (let [c (chan)]
     (.addEventListener js/window "keydown" (fn [event]
                                              (when-let [dir (case (.-keyCode event)
@@ -73,57 +116,77 @@
                                                (put! c dir))))
     c))
 
-(defn update-pos [pos dir]
-  (let [offsets {"up"    [ 0 -1 ]
-                 "down"  [ 0  1 ]
-                 "left"  [-1  0 ]
-                 "right" [ 1  0 ]}]
-    (mapv + pos (offsets dir))))
+(defn move [dir pos]
+  "Moves the given coordinates one cell in the given direction."
+  (let [offset {"up"    [ 0 -1 ]
+                "down"  [ 0  1 ]
+                "left"  [-1  0 ]
+                "right" [ 1  0 ]}]
+    (mapv + pos (offset dir))))
 
-;; Main logic.
+;; Game logic
+(defn move-player [state player]
+  (let [{:keys [dir pos]} (state player)
+        new-positions (map (partial move dir) pos)]
+    (assoc-in state [player :pos] new-positions)))
+
+(defn step-game [state]
+  (-> state
+      (move-player "player-1")
+      (move-player "player-2")))
+
+;; Main loop
 (defn start-game [game-ref us them]
   (go
-    (let [tick (tick-chan (/ 1000 FPS))
+    (let [tick (tick-chan (/ 1000 fps))
           our-ref (.child game-ref us)
           dir-chan (direction-chan)
           their-chan (on (.child game-ref them) "value")
-          initial-state {"player-1" {:pos [50 50] :their-pos [200 200] :dir "right" :frame 0}
-                         "player-2" {:pos [200 200] :their-pos [50 50] :dir "left" :frame 0}}]
+          initial-state {"player-1" {:pos (list [10 10]) :len 1 :dir "right"}
+                         "player-2" {:pos (list [30 30]) :len 1 :dir "left"}
+                         :frame 0}]
 
-      (<! (timeout 1000))
+      (.set our-ref (clj->js {:dir (get-in initial-state [us :dir])
+                              :frame (:frame initial-state)}))
 
-      (loop [state (initial-state us)]
-        (set! js/window.s state)
-        (let [{:keys [dir pos their-pos frame]} state]
-          (.set (.child our-ref "dir") dir)
-          (.set (.child our-ref "frame") frame)
-          (render pos their-pos)
-          (<! tick)
-          (recur
-            (->
-              (alt!
-                dir-chan ([new-dir]
-                          (assoc state :dir new-dir))
-                their-chan ([their-data]
-                            (if-let [their-dir (aget their-data "dir")]
-                              (-> state
-                                  (assoc :pos (update-pos pos dir))
-                                  (assoc :their-pos (update-pos their-pos their-dir)))
-                              state))
-                :priority true)
-              (assoc :frame (inc frame)))))))))
+      (loop [state initial-state prev-state initial-state]
 
-;; Try to join game.
-(go
-  (let [waiting (path "/waiting")]
-    (if-let [game-url (<! (once waiting "value"))]
-      ;; If there is an existing game, join it and clear waiting.
-      (let [game-ref (new js/Firebase game-url)]
-        (.remove waiting)
-        (start-game game-ref "player-2" "player-1"))
-      ;; Otherwise, make a new game and put it's URL in waiting.
-      (let [game-ref (.push (path "/games"))
-            game-url (.toString game-ref)]
-        (.set waiting game-url)
-        (start-game game-ref "player-1" "player-2")))))
+        ;; Wait until the next tick so we don't go too fast.
+        (<! tick)
 
+        (alt!
+          dir-chan ([new-dir]
+                    ;; Update our direction when the user presses an arrow key.
+                    (recur (assoc-in state [us :dir] new-dir) prev-state))
+          their-chan ([their-data]
+                      ;; When the other player informs us of their state,
+                      ;; update our state.
+                      (when-let [their-dir (aget their-data "dir")]
+                        ;; Inform other player of our state.
+                        (.set our-ref (clj->js {:dir (get-in state [us :dir])
+                                                :frame (inc (:frame state))}))
+                        (recur (-> state
+                                   (assoc-in [them :dir] their-dir)
+                                   step-game
+                                   (update-in [:frame] inc))
+                               state)))
+          :priority true)
+
+        (recur state prev-state)))))
+
+;; Joining
+(defn join-game []
+  (go
+    (let [game-to-join (path "/game-to-join")]
+      (if-let [game-url (<! (once game-to-join "value"))]
+        ;; If there is an existing game, join it and clear game-to-join.
+        (let [game-ref (new js/Firebase game-url)]
+          (.remove game-to-join)
+          (start-game game-ref "player-2" "player-1"))
+        ;; Otherwise, make a new game and put it's URL in game-to-join.
+        (let [game-ref (.push (path "/games"))
+              game-url (.toString game-ref)]
+          (.set game-to-join game-url)
+          (start-game game-ref "player-1" "player-2"))))))
+
+(join-game)
