@@ -38,19 +38,20 @@
 
 (defn path [name] (.child root name))
 
-(defn un-nil [x]
+(defn nil->false [x]
+  ;; nil cannot be sent through channels, so this is used to turn nil into false.
   (if (nil? x)
     false
     x))
 
 (defn on [firebase event-type]
   (let [c (chan 10)]
-    (.on firebase event-type #(put! c (un-nil (.val %))) #(close! c))
+    (.on firebase event-type #(put! c (nil->false (.val %))) #(close! c))
     c))
 
 (defn once [firebase event-type]
   (let [c (chan)]
-    (.once firebase event-type #(put! c (un-nil (.val %))) #(close! c))
+    (.once firebase event-type #(put! c (nil->false (.val %))) #(close! c))
     c))
 
 ;; Utility functions.
@@ -68,39 +69,50 @@
                                                               39 "right"
                                                               40 "down"
                                                               nil)]
+                                               ; Disable scrolling when user presses arrow keys.
+                                               (.preventDefault event)
                                                (put! c dir))))
     c))
 
 (defn update-pos [pos dir]
-  (let [s 3
-        dirs {"up"    [0 (- s)]
-              "down"  [0 s]
-              "left"  [(- s) 0]
-              "right" [s 0]}]
-    (mapv + pos (dirs dir))))
+  (let [offsets {"up"    [ 0 -1 ]
+                 "down"  [ 0  1 ]
+                 "left"  [-1  0 ]
+                 "right" [ 1  0 ]}]
+    (mapv + pos (offsets dir))))
 
 ;; Main logic.
 (defn start-game [game-ref us them]
   (go
     (let [tick (tick-chan (/ 1000 FPS))
-          our-dir-ref (.child game-ref us)
+          our-ref (.child game-ref us)
           dir-chan (direction-chan)
-          initial-dir (if (= us "player-1") "right" "left")
-          their-dir-chan (on (.child game-ref them) "value")]
+          their-chan (on (.child game-ref them) "value")
+          initial-state {"player-1" {:pos [50 50] :their-pos [200 200] :dir "right" :frame 0}
+                         "player-2" {:pos [200 200] :their-pos [50 50] :dir "left" :frame 0}}]
 
       (<! (timeout 1000))
 
-      (loop [our-pos [50 50] their-pos [200 200] our-dir initial-dir]
-        (.set our-dir-ref our-dir)
-        (render our-pos their-pos)
-        (<! tick)
-        (alt!
-          ;tick (recur our-pos their-pos our-dir)
-          ;tick (recur (update-pos our-pos our-dir) (update-pos their-pos our-dir) our-dir)
-          dir-chan ([new-dir]
-                    (recur our-pos their-pos new-dir))
-          their-dir-chan ([their-dir]
-                          (recur (update-pos our-pos our-dir) (update-pos their-pos their-dir) our-dir)))))))
+      (loop [state (initial-state us)]
+        (set! js/window.s state)
+        (let [{:keys [dir pos their-pos frame]} state]
+          (.set (.child our-ref "dir") dir)
+          (.set (.child our-ref "frame") frame)
+          (render pos their-pos)
+          (<! tick)
+          (recur
+            (->
+              (alt!
+                dir-chan ([new-dir]
+                          (assoc state :dir new-dir))
+                their-chan ([their-data]
+                            (if-let [their-dir (aget their-data "dir")]
+                              (-> state
+                                  (assoc :pos (update-pos pos dir))
+                                  (assoc :their-pos (update-pos their-pos their-dir)))
+                              state))
+                :priority true)
+              (assoc :frame (inc frame)))))))))
 
 ;; Try to join game.
 (go
@@ -116,4 +128,3 @@
         (.set waiting game-url)
         (start-game game-ref "player-1" "player-2")))))
 
-(debug (+ 1 1))
