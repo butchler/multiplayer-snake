@@ -6,7 +6,7 @@
 (repl/connect "http://localhost:9000/repl")
 
 ;; Constants
-(def fps 5)
+(def fps 10)
 (def cols 40)
 (def rows 40)
 
@@ -117,11 +117,12 @@
 
 (defn move [dir pos]
   "Moves the given coordinates one cell in the given direction."
-  (let [offset {"up"    [ 0 -1 ]
+  (mapv + pos (case dir
+                "up"    [ 0 -1 ]
                 "down"  [ 0  1 ]
                 "left"  [-1  0 ]
-                "right" [ 1  0 ]}]
-    (mapv + pos (offset dir))))
+                "right" [ 1  0 ]
+                [0 0])))
 
 ;; Game logic
 (defn move-player [state player]
@@ -144,50 +145,40 @@
 (defn start-game [game-ref us them]
   (let [tick (tick-chan (/ 1000 fps))
         our-data (.child game-ref us)
-        their-data (.child game-ref them)
+        their-data (on (.child game-ref them) "value")
         our-dir (direction-chan)
-        their-dir (on (.child their-data "dir") "value")
-        their-frame (on (.child their-data "frame") "value")
         initial-state {"player-1" {:pos (list [10 10]) :len 1 :dir "right"}
                        "player-2" {:pos (list [30 30]) :len 1 :dir "left"}
                        :frame 0}]
+
+    (.set (.child our-data "frame") 0)
+
     (go
       (loop [state initial-state]
         (alt!
           our-dir ([new-dir]
                    ;; Update our direction when the user presses an arrow key.
-                   (.set (.child our-data "dir") new-dir)
                    (recur (assoc-in state [us :dir] new-dir)))
-          their-dir ([new-dir]
-                     (if new-dir
-                       (recur (assoc-in state [them :dir] new-dir))
-                       (recur state)))
           command-chan ([command]
                         (when (= command "log")
                           (console/log (str state))
                           (recur state)))
-          their-frame (let [_ (.set our-data (clj->js {:dir (get-in state [us :dir])
-                                                       :frame (inc (:frame state))}))
-                            ;_ (<! tick)
-                            _ (<! step-chan)
-                            new-state (step-game state)
-                            new-state (update-in new-state [:frame] inc)]
+          their-data ([data]
+                      (if data
+                        (let [_ (.set our-data (clj->js {:dir (get-in state [us :dir])
+                                                         :frame (inc (:frame state))}))
+                              _ (<! tick)
+                              their-dir (aget data "dir")
+                              new-state (-> state
+                                            (assoc-in [them :dir] their-dir)
+                                            step-game
+                                            (update-in [:frame] inc))]
 
-                        ;; Inform other player of our state.
-                        #_(.set our-data (clj->js {:dir (get-in new-state [us :dir])
-                                                 :frame (:frame new-state)}))
+                          (console/log (str new-state))
+                          (render! new-state)
 
-                        ;(console/log (str new-state))
-                        (console/log (str state))
-
-                        ;(render! new-state)
-                        (render! state)
-
-                        ;; Wait until the next tick so we don't go too fast.
-                        ;(<! tick)
-                        ;(<! step-chan)
-
-                        (recur new-state))
+                          (recur new-state))
+                        (recur state)))
           :priority true)))))
 
 ;; Joining
