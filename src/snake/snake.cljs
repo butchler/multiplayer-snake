@@ -6,7 +6,7 @@
 (repl/connect "http://localhost:9000/repl")
 
 ;; Constants
-(def fps 10)
+(def fps 2)
 (def cols 40)
 (def rows 40)
 
@@ -45,18 +45,6 @@
     cells))
 
 (def grid (make-grid!))
-
-#_
-(defn render [state]
-  (doseq [x (range cols) y (range rows)]
-    (let [pos [x y]
-          player-1-positions (set (get-in state ["player-1" :pos]))
-          player-2-positions (set (get-in state ["player-2" :pos]))
-          class (cond
-                  (player-1-positions pos) "player-1"
-                  (player-2-positions pos) "player-2"
-                  :else "")]
-      (set! (.-className (get-in grid [y x])) class))))
 
 (defn set-cell! [[x y] class]
   (when-let [cell (get-in grid [y x])]
@@ -151,35 +139,43 @@
                        "player-2" {:pos (list [30 30]) :len 1 :dir "left"}
                        :frame 0}]
 
-    (.set (.child our-data "frame") 0)
+    (when (= us "player-1")
+      (.set our-data (clj->js {:dir (get-in initial-state [us :dir])
+                               :frame (:frame initial-state)})))
 
     (go
-      (loop [state initial-state]
+      (loop [state initial-state next-dir (get-in initial-state [us :dir])]
         (alt!
           our-dir ([new-dir]
-                   ;; Update our direction when the user presses an arrow key.
-                   (recur (assoc-in state [us :dir] new-dir)))
+                   (recur state new-dir))
           command-chan ([command]
                         (when (= command "log")
                           (console/log (str state))
-                          (recur state)))
+                          (recur state next-dir)))
           their-data ([data]
                       (if data
-                        (let [_ (.set our-data (clj->js {:dir (get-in state [us :dir])
+                        (let [_ (.set our-data (clj->js {:dir (if (= us "player-1") (get-in state [us :dir]) next-dir)
                                                          :frame (inc (:frame state))}))
-                              _ (<! tick)
                               their-dir (aget data "dir")
                               new-state (-> state
                                             (assoc-in [them :dir] their-dir)
                                             step-game
+                                            (assoc-in [us :dir] next-dir)
                                             (update-in [:frame] inc))]
 
                           (console/log (str new-state))
                           (render! new-state)
+                          #_ (let [state (if (= us "player-2") state new-state)]
+                               (console/log (str new-state))
+                               (render! new-state))
 
-                          (recur new-state))
-                        (recur state)))
-          :priority true)))))
+                          (<! tick)
+
+                          (recur new-state next-dir))
+                        (recur state next-dir)))
+          :priority true)))
+
+    (close! their-data)))
 
 ;; Joining
 (defn join-game []
