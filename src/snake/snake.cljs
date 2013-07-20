@@ -6,7 +6,7 @@
 (repl/connect "http://localhost:9000/repl")
 
 ;; Constants
-(def fps 2)
+(def fps 5)
 (def cols 40)
 (def rows 40)
 
@@ -62,23 +62,28 @@
 
 (defn path [name] (.child root name))
 
-(defn nil->false [x]
+(defn nil->false
   "nil cannot be sent through channels, so this is used to turn nil into false."
+  [x]
   (if (nil? x)
     false
     x))
 
-(defn on [firebase event-type]
+(defn on
   "Creates a channel for a Firebase event."
-  (let [c (chan 10)]
-    (.on firebase event-type #(put! c (nil->false (.val %))) #(close! c))
-    c))
+  ([firebase-ref event-type] (on firebase-ref event-type identity))
+  ([firebase-ref event-type wrapper-fn]
+   (let [c (chan 10)]
+     (.on firebase-ref event-type #(put! c (wrapper-fn (.val %))) #(close! c))
+     c)))
 
-(defn once [firebase event-type]
+(defn once
   "Creates a channel for a Firebase event that only executes once."
-  (let [c (chan)]
-    (.once firebase event-type #(put! c (nil->false (.val %))) #(close! c))
-    c))
+  ([firebase-ref event-type] (once firebase-ref event-type identity))
+  ([firebase-ref event-type wrapper-fn]
+   (let [c (chan)]
+     (.once firebase-ref event-type #(put! c (wrapper-fn (.val %))) #(close! c))
+     c)))
 
 ;; Utility
 (defn tick-chan [ms]
@@ -153,35 +158,31 @@
                           (console/log (str state))
                           (recur state next-dir)))
           their-data ([data]
-                      (if data
-                        (let [_ (.set our-data (clj->js {:dir (if (= us "player-1") (get-in state [us :dir]) next-dir)
-                                                         :frame (inc (:frame state))}))
-                              their-dir (aget data "dir")
-                              new-state (-> state
-                                            (assoc-in [them :dir] their-dir)
-                                            step-game
-                                            (assoc-in [us :dir] next-dir)
-                                            (update-in [:frame] inc))]
+                      (.set our-data (clj->js {:dir (if (= us "player-2") (get-in state [us :dir]) next-dir)
+                                               :frame (inc (:frame state))}))
 
-                          (console/log (str new-state))
-                          (render! new-state)
-                          #_ (let [state (if (= us "player-2") state new-state)]
-                               (console/log (str new-state))
-                               (render! new-state))
+                      (let [their-dir (aget data "dir")
+                            new-state (-> state
+                                          (assoc-in [them :dir] their-dir)
+                                          step-game
+                                          (assoc-in [us :dir] next-dir)
+                                          (update-in [:frame] inc))]
 
-                          (<! tick)
+                        (console/log (str new-state))
+                        (render! new-state)
 
-                          (recur new-state next-dir))
-                        (recur state next-dir)))
-          :priority true)))
+                        (<! tick)
 
-    (close! their-data)))
+                        (recur new-state next-dir)))
+          :priority true))
+
+      (close! their-data))))
 
 ;; Joining
 (defn join-game []
   (go
     (let [game-to-join (path "/game-to-join")]
-      (if-let [game-url (<! (once game-to-join "value"))]
+      (if-let [game-url (<! (once game-to-join "value" nil->false))]
         ;; If there is an existing game, join it and clear game-to-join.
         (let [game-ref (new js/Firebase game-url)]
           (.remove game-to-join)
