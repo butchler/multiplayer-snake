@@ -123,57 +123,46 @@
         new-positions (map (partial move dir) pos)]
     (assoc-in state [player :pos] new-positions)))
 
-(defn step-game [state]
-  (-> state
-      (move-player "player-1")
-      (move-player "player-2")))
-
 ;; Main loop
 (def command-chan (chan))
-(def step-chan (chan))
+(def step (chan))
 (set! js/window.kill #(put! command-chan "die"))
 (set! js/window.log-state #(put! command-chan "log"))
-(set! js/window.step #(put! step-chan "step"))
+(set! js/window.step #(put! step "step"))
 
 (defn start-game [game-ref us them]
   (let [tick (tick-chan (/ 1000 fps))
         our-data (.child game-ref us)
         their-data (on (.child game-ref them) "value")
         our-dir (direction-chan)
-        initial-state {"player-1" {:pos (list [10 10]) :len 1 :dir "right"}
-                       "player-2" {:pos (list [30 30]) :len 1 :dir "left"}
+        send-dir #(.set our-data (clj->js {:dir (get-in % [us :dir])
+                                           :frame (:frame %)}))
+        initial-state {"player-1" {:pos (list [10 10]) :dir "right"}
+                       "player-2" {:pos (list [30 30]) :dir "left"}
                        :frame 0}]
-
-    (when (= us "player-1")
-      (.set our-data (clj->js {:dir (get-in initial-state [us :dir])
-                               :frame (:frame initial-state)})))
-
     (go
-      (loop [state initial-state next-dir (get-in initial-state [us :dir])]
+      (loop [state (if (= us "player-1")
+                     (do
+                       (send-dir initial-state)
+                       (move-player initial-state us))
+                     initial-state)]
         (alt!
           our-dir ([new-dir]
-                   (recur state new-dir))
+                   (recur (assoc-in state [us :dir] new-dir)))
           command-chan ([command]
                         (when (= command "log")
                           (console/log (str state))
-                          (recur state next-dir)))
+                          (recur state)))
           their-data ([data]
-                      (.set our-data (clj->js {:dir (if (= us "player-2") (get-in state [us :dir]) next-dir)
-                                               :frame (inc (:frame state))}))
+                      (send-dir state)
 
-                      (let [their-dir (aget data "dir")
-                            new-state (-> state
-                                          (assoc-in [them :dir] their-dir)
-                                          step-game
-                                          (assoc-in [us :dir] next-dir)
+                      (let [new-state (-> state
+                                          (assoc-in [them :dir] (aget data "dir"))
+                                          (move-player "player-1")
+                                          (move-player "player-2")
                                           (update-in [:frame] inc))]
-
-                        (console/log (str new-state))
                         (render! new-state)
-
-                        (<! tick)
-
-                        (recur new-state next-dir)))
+                        (recur new-state)))
           :priority true))
 
       (close! their-data))))
