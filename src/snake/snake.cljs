@@ -138,6 +138,14 @@
       [ 1  0 ] "right"
       nil)))
 
+(defn opposite-direction [direction]
+  (case direction
+    "up" "down"
+    "left" "right"
+    "right" "left"
+    "down" "up"
+    nil))
+
 ;; Game logic
 (defn is-dead? [state player]
   (let [{:keys [direction positions]} (state player)
@@ -187,7 +195,10 @@
                      initial-state)]
         (alt!
           arrow-keys ([new-direction]
-                      (recur (assoc-in state [us :direction] new-direction)))
+                      (let [current-direction (get-in state [us :direction])]
+                        (if-not (= new-direction (opposite-direction current-direction))
+                          (recur (assoc-in state [us :direction] new-direction))
+                          (recur state))))
           commands ([command]
                     (when (= command "log")
                       (console/log (str state))
