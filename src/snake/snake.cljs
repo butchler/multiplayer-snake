@@ -9,6 +9,11 @@
 (def fps 5)
 (def cols 40)
 (def rows 40)
+(def initial-length 5)
+(def initial-state {"player-1" {:positions (repeat initial-length [10 10])
+                                :direction "right"}
+                    "player-2" {:positions (repeat initial-length [30 30])
+                                :direction "left"}})
 
 ;; Rendering
 (defn el
@@ -33,9 +38,10 @@
 
      element)))
 
-(defn make-grid! []
+(defn make-grid!
   "Make a grid of cells (as <b> elements), append the grid to body, and return
   the cells as a matrix."
+  []
   (let [cells (vec (for [_ (range rows)]
                 (vec (for [_ (range cols)]
                   (el "b")))))
@@ -50,12 +56,15 @@
   (when-let [cell (get-in grid [y x])]
     (aset cell "className" class)))
 
-(defn render-player! [state player]
-  (set-cell! (first (get-in state [player :pos])) player))
+(defn render-player! [prev-state state player]
+  (let [positions (get-in state [player :positions])
+        prev-positions (get-in prev-state [player :positions])]
+    (set-cell! (last prev-positions) "")
+    (set-cell! (first positions) player)))
 
-(defn render! [state]
-  (render-player! state "player-1")
-  (render-player! state "player-2"))
+(defn render! [prev-state state]
+  (render-player! prev-state state "player-1")
+  (render-player! prev-state state "player-2"))
 
 ;; Firebase
 (def root (new js/Firebase "https://snake.firebaseio.com/"))
@@ -86,15 +95,17 @@
      c)))
 
 ;; Utility
-(defn tick-chan [ms]
+(defn tick-chan
   "Creates a channel that gets \"tick\" put onto it every ms milliseconds."
+  [ms]
   (let [c (chan)]
     (js/setInterval #(put! c "tick") ms)
     c))
 
-(defn direction-chan []
+(defn arrow-chan
   "Creates a channel that gets direction strings (e.g. \"left\", \"up\") put
-  onto it whenever the user presses a key."
+  onto it whenever the user presses an arrow key."
+  []
   (let [c (chan)]
     (.addEventListener js/window "keydown" (fn [event]
                                              (when-let [dir (case (.-keyCode event)
@@ -108,8 +119,9 @@
                                                (put! c dir))))
     c))
 
-(defn move [dir pos]
+(defn move
   "Moves the given coordinates one cell in the given direction."
+  [pos dir]
   (mapv + pos (case dir
                 "up"    [ 0 -1 ]
                 "down"  [ 0  1 ]
@@ -117,55 +129,92 @@
                 "right" [ 1  0 ]
                 [0 0])))
 
+(defn get-direction [from to]
+  (let [difference (mapv - to from)]
+    (case difference
+      [ 0 -1 ] "up"
+      [ 0  1 ] "down"
+      [-1  0 ] "left"
+      [ 1  0 ] "right"
+      nil)))
+
 ;; Game logic
+(defn is-dead? [state player]
+  (let [{:keys [direction positions]} (state player)
+        head (first positions)
+        next-head (move head direction)
+        opponent (if (= player "player-1") "player-2" "player-1")
+        opponent-positions (get-in state [opponent :positions])]
+    (if (some #(= next-head %) (concat positions opponent-positions))
+      true
+      (let [[x y] next-head]
+        (or (< x 0)
+            (>= x cols)
+            (< y 0)
+            (>= y rows))))))
+
 (defn move-player [state player]
-  (let [{:keys [dir pos]} (state player)
-        new-positions (map (partial move dir) pos)]
-    (assoc-in state [player :pos] new-positions)))
+  (let [dead? (or (:dead? (state player)) (is-dead? state player))]
+    (if dead?
+      (assoc-in state [player :dead?] dead?)
+      (let [{:keys [direction positions]} (state player)
+            directions (cons direction (map get-direction (drop 1 positions) positions))
+            new-positions (map move positions directions)]
+        (-> state
+            (assoc-in [player :positions] new-positions)
+            (assoc-in [player :dead?] dead?))))))
 
 ;; Main loop
-(def command-chan (chan))
-(def step (chan))
-(set! js/window.kill #(put! command-chan "die"))
-(set! js/window.log-state #(put! command-chan "log"))
-(set! js/window.step #(put! step "step"))
+(def commands (chan))
+(def steps (chan))
+(set! js/window.kill #(put! commands "die"))
+(set! js/window.log-state #(put! commands "log"))
+(set! js/window.step #(put! steps "step"))
 
 (defn start-game [game-ref us them]
-  (let [tick (tick-chan (/ 1000 fps))
-        our-data (.child game-ref us)
-        their-data (on (.child game-ref them) "value")
-        our-dir (direction-chan)
-        send-dir #(.set our-data (clj->js {:dir (get-in % [us :dir])
-                                           :frame (:frame %)}))
-        initial-state {"player-1" {:pos (list [10 10]) :dir "right"}
-                       "player-2" {:pos (list [30 30]) :dir "left"}
-                       :frame 0}]
+  (let [ticks (tick-chan (/ 1000 fps))
+        arrow-keys (arrow-chan)
+        their-updates (on (.child game-ref them) "value")
+        send-update #(.set (.child game-ref us) (clj->js {:direction (get-in % [us :direction])
+                                                          :frame (:frame %)}))
+        initial-state (assoc initial-state :frame 0)]
     (go
       (loop [state (if (= us "player-1")
                      (do
-                       (send-dir initial-state)
+                       ;; The first player does the first update to get things rolling.
+                       (send-update initial-state)
                        (move-player initial-state us))
                      initial-state)]
         (alt!
-          our-dir ([new-dir]
-                   (recur (assoc-in state [us :dir] new-dir)))
-          command-chan ([command]
-                        (when (= command "log")
-                          (console/log (str state))
-                          (recur state)))
-          their-data ([data]
-                      (send-dir state)
-
-                      (let [new-state (-> state
-                                          (assoc-in [them :dir] (aget data "dir"))
-                                          (move-player "player-1")
-                                          (move-player "player-2")
-                                          (update-in [:frame] inc))]
-                        (render! new-state)
-                        (recur new-state)))
+          arrow-keys ([new-direction]
+                      (recur (assoc-in state [us :direction] new-direction)))
+          commands ([command]
+                    (when (= command "log")
+                      (console/log (str state))
+                      (recur state)))
+          their-updates ([data]
+                         ;; When the other player updates, we update.
+                         (let [their-direction (aget data "direction")
+                               new-state (-> state
+                                             (assoc-in [them :direction] their-direction)
+                                             (move-player "player-1")
+                                             (move-player "player-2")
+                                             (update-in [:frame] inc))]
+                           (send-update new-state)
+                           (render! state new-state)
+                           (<! ticks)
+                           #_(when (= us "player-1")
+                               (<! steps))
+                           (recur new-state)))
           :priority true))
 
-      (close! their-data))))
+      ;; Is it necessary to close all of the channels? Are they closed when
+      ;; they are garbage-collected?
+      (close! commands)
+      (close! steps)
+      (close! ticks)
+      (close! arrow-keys)
+      (close! their-updates))))
 
 ;; Joining
 (defn join-game []
