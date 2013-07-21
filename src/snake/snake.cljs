@@ -3,7 +3,7 @@
             [cljs.core.async :refer [chan timeout <! >! put! take! alts! close!]])
   (:require-macros [cljs.core.async.macros :refer [go alt!]]))
 
-(repl/connect "http://localhost:9000/repl")
+;(repl/connect "http://localhost:9000/repl")
 
 ;; Constants
 (def fps 5)
