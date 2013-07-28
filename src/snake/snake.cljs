@@ -172,7 +172,7 @@
 (set! js/window.log-state #(put! commands "log"))
 (set! js/window.step #(put! steps "step"))
 
-#_(defn start-game [receive-chan send-chan us them]
+(defn start-game [receive-chan send-chan us them]
   (let [ticks (tick-chan (/ 1000 fps))
         arrow-keys (arrow-chan)
         initial-state (assoc initial-state :frame 0)]
@@ -192,18 +192,20 @@
                       (recur state)))
           receive-chan ([their-state]
                         ;; When the other player updates, we update.
-                        (let [their-direction (aget their-state "direction")
+                        (let [their-direction (aget their-state them "direction")
                               new-state (-> state
                                             (assoc-in [them :direction] their-direction)
                                             (move-player "player-1")
                                             (move-player "player-2")
                                             (update-in [:frame] inc))]
                           (>! send-chan (clj->js new-state))
-                          (<! ticks)
-                          (render! state new-state)
+                          ;(<! ticks)
                           #_(when (= us "player-1")
                               (<! steps))
-                          (recur new-state)))
+                          (render! state new-state)
+                          (when-not (and (get-in new-state [us :dead?])
+                                         (get-in new-state [them :dead?]))
+                            (recur new-state))))
           :priority true))
 
       ;; Is it necessary to close all of the channels? Are they closed when
@@ -214,10 +216,6 @@
       (close! arrow-keys)
       (close! receive-chan)
       (close! send-chan))))
-
-(defn start-game [receive-chan send-chan _ _ ]
-  (close! receive-chan)
-  (close! send-chan))
 
 ;; Joining
 (defn join-game []
