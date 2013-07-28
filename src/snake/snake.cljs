@@ -1,6 +1,7 @@
 (ns snake
   (:require [clojure.browser.repl :as repl]
-            [cljs.core.async :refer [chan timeout <! >! put! take! alts! close!]])
+            [cljs.core.async :refer [chan timeout <! >! put! take! alts! close!]]
+            [clojure.string :refer [split]])
   (:require-macros [cljs.core.async.macros :refer [go alt!]]))
 
 ;(repl/connect "http://localhost:9000/repl")
@@ -179,18 +180,15 @@
 (set! js/window.log-state #(put! commands "log"))
 (set! js/window.step #(put! steps "step"))
 
-(defn start-game [game-ref us them]
+(defn start-game [receive-chan send-chan us them]
   (let [ticks (tick-chan (/ 1000 fps))
         arrow-keys (arrow-chan)
-        their-updates (on (.child game-ref them) "value")
-        send-update #(.set (.child game-ref us) (clj->js {:direction (get-in % [us :direction])
-                                                          :frame (:frame %)}))
         initial-state (assoc initial-state :frame 0)]
     (go
       (loop [state (if (= us "player-1")
                      (do
                        ;; The first player does the first update to get things rolling.
-                       (send-update initial-state)
+                       (>! send-chan (clj->js initial-state))
                        (move-player initial-state us))
                      initial-state)]
         (alt!
@@ -203,20 +201,22 @@
                     (when (= command "log")
                       (console/log (str state))
                       (recur state)))
-          their-updates ([data]
-                         ;; When the other player updates, we update.
-                         (let [their-direction (aget data "direction")
-                               new-state (-> state
-                                             (assoc-in [them :direction] their-direction)
-                                             (move-player "player-1")
-                                             (move-player "player-2")
-                                             (update-in [:frame] inc))]
-                           (send-update new-state)
-                           (render! state new-state)
-                           (<! ticks)
-                           #_(when (= us "player-1")
-                               (<! steps))
-                           (recur new-state)))
+          receive-chan ([their-state]
+                        ;; When the other player updates, we update.
+                        (let [their-direction (aget their-state them "direction")
+                              new-state (-> state
+                                            (assoc-in [them :direction] their-direction)
+                                            (move-player "player-1")
+                                            (move-player "player-2")
+                                            (update-in [:frame] inc))]
+                          (>! send-chan (clj->js new-state))
+                          ;(<! ticks)
+                          #_(when (= us "player-1")
+                              (<! steps))
+                          (render! state new-state)
+                          (when-not (and (get-in new-state [us :dead?])
+                                         (get-in new-state [them :dead?]))
+                            (recur new-state))))
           :priority true))
 
       ;; Is it necessary to close all of the channels? Are they closed when
@@ -225,22 +225,41 @@
       (close! steps)
       (close! ticks)
       (close! arrow-keys)
-      (close! their-updates))))
+      (close! receive-chan)
+      (close! send-chan))))
 
 ;; Joining
 (defn join-game []
   (go
     (let [game-to-join (path "/game-to-join")]
-      (if-let [game-url (<! (once game-to-join "value" nil->false))]
+      (if-let [game-id (<! (once game-to-join "value" nil->false))]
         ;; If there is an existing game, join it and clear game-to-join.
-        (let [game-ref (new js/Firebase game-url)]
+        (let [peer (js/Peer. (str "game" game-id "-player-2")
+                             (clj->js {:key "krk2f5egq95xko6r"}))
+              conn (.connect peer (str "game" game-id "-player-1"))
+              receive-chan (chan)
+              send-chan (chan)]
+          (.set (path (str "/games/" game-id "/player-2")) "connected")
           (.remove game-to-join)
-          (start-game game-ref "player-2" "player-1"))
+          (.on conn "data" #(put! receive-chan %))
+          (go (while true (.send conn (<! send-chan))))
+          (.on conn "open" #(start-game receive-chan send-chan
+                                        "player-2" "player-1")))
         ;; Otherwise, make a new game and put it's URL in game-to-join.
         (let [_ (.remove root)
               game-ref (.push (path "/games"))
-              game-url (.toString game-ref)]
-          (.set game-to-join game-url)
-          (start-game game-ref "player-1" "player-2"))))))
+              game-url (.toString game-ref)
+              game-id (peek (split game-url #"/"))
+              peer (js/Peer. (str "game" game-id "-player-1")
+                             (clj->js {:key "krk2f5egq95xko6r"}))]
+          (.set (.child game-ref "player-1") "connecting")
+          (.set game-to-join game-id)
+          (.on peer "connection" (fn [conn]
+                                   (let [receive-chan (chan)
+                                         send-chan (chan)]
+                                     (.on conn "data" #(put! receive-chan %))
+                                     (go (while true (.send conn (<! send-chan))))
+                                     (start-game receive-chan send-chan
+                                                 "player-1" "player-2")))))))))
 
 (join-game)
